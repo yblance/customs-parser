@@ -13,6 +13,27 @@ def extract_text_from_pdf_bytes(pdf_bytes):
             text += page.get_text("text")
     return text
 
+def extract_port(text):
+    """指运港：兼容全/半角括号 + 跨行 + 跨段"""
+    boundary = r"(?=境内货源地|批准文号|成交方式|合同协议号|件数)"
+    m = re.search(r"指运港[^\r\n]*\r?\n([\s\S]*?)" + boundary, text)
+    if not m:
+        return ""
+    raw = m.group(1)
+    lines = [l.strip() for l in raw.split("\n") if l.strip()]
+    # 过滤掉单独的闭合括号 "）" ")"
+    lines = [l for l in lines if l not in {"）", ")"}]
+    if not lines:
+        return ""
+    # 主名行：排除以 ( 或 （ 开头的残段
+    main_lines = [l for l in lines if not (l.startswith("（") or l.startswith("("))]
+    port = " ".join(main_lines) if main_lines else lines[0]
+    # 去掉尾部的国家/地区代码括号，如 "(344)" 或 "（俄罗斯）"
+    port = re.sub(r"[\(（][^()（）]*[\)）]\s*$", "", port).strip()
+    # 兜底：若仍有未闭合的 "(xxx" 残段，从最后一个 ( 截断
+    port = re.sub(r"[\(（][^()（）]*$", "", port).strip()
+    return port
+
 def extract_fields(text, filename=""):
     """解析报关单文本，提取多产品信息"""
     public_info = {
@@ -37,9 +58,10 @@ def extract_fields(text, filename=""):
         bs = re.search(r"\b(BS-[A-Za-z0-9\-]+)\b", text)
         if bs: public_info["合同协议号"] = bs.group(1)
         
-    # 🌟 修复指运港 Bug：兼容跨平台的 \r\n 和 \n 换行符
-    port = re.search(r"指运港\(地区\)[^\r\n]*[\r\n]+\s*([^\r\n]+)", text)
-    if port: public_info["指运港"] = port.group(1).strip()
+    # 🌟 修复指运港 Bug：兼容全/半角括号、跨行、多行抓取
+    port = extract_port(text)
+    if port:
+        public_info["指运港"] = port
 
     # 切块提取商品明细
     hs_matches = list(re.finditer(r"\b(\d{10})\b", text))
@@ -103,11 +125,15 @@ def extract_fields(text, filename=""):
         # 减法提取产品名称
         lines = chunk.split('\n')
         name_parts = []
-        country = public_info.get("指运港", "俄罗斯")
+        country = public_info.get("指运港", "")  # 若指运港未拿到，留空避免硬编码误删
         remove_patterns = [
             r"商品名称[、,]?规格型号", r"申报数量/申报单位", r"法定数量/法定单位", r"第二数量/第二单位",
-            r"目的国\(地区\)", r"指运港\(地区\)", r"单价", r"总价", r"币制", r"数量及单位",
-            country, r"中国", r"\b(CNY|USD|EUR|人民币|美元)\b",
+            r"目的国[\(（][^()（）]*[\)）]", r"指运港[\(（][^()（）]*[\)）]", r"单价", r"总价", r"币制", r"数量及单位",
+        ]
+        if country:
+            remove_patterns.append(rf"^{re.escape(country)}$")
+        remove_patterns += [
+            r"中国", r"\b(CNY|USD|EUR|人民币|美元)\b",
             r"\b\d+(?:\.\d+)?\s*(千克|个|件|套|双|吨|平方米|升|台|辆|克|千米|米)\b"
         ]
         
@@ -150,19 +176,25 @@ if uploaded_zip is not None:
             data_rows = []
             try:
                 with zipfile.ZipFile(uploaded_zip) as z:
-                    # 🌟 修复乱码 Bug：强制用正确编码解析 ZIP 中的文件名
+                    # 🌟 修复乱码 Bug：分情况解码 ZIP 中的文件名
+                    # 1. 若声明了 UTF-8 标志位（位 0x800），zipfile 已按 UTF-8 解码，直接用
+                    # 2. 否则用 filename_raw 拿原始字节，依次尝试 GBK / GB2312 / Big5，都不行再退回 UTF-8
                     valid_files = []
                     for info in z.infolist():
-                        # 判断是否已经是 utf-8 编码
                         if info.flag_bits & 0x800:
                             decoded_name = info.filename
                         else:
-                            # 尝试修复 Windows 的 GBK 编码乱码
-                            try:
-                                decoded_name = info.filename.encode('cp437').decode('gbk')
-                            except:
-                                decoded_name = info.filename
-                                
+                            raw_bytes = getattr(info, "filename_raw", None) or info.filename.encode("utf-8", errors="replace")
+                            decoded_name = None
+                            for enc in ("gbk", "gb2312", "big5"):
+                                try:
+                                    decoded_name = raw_bytes.decode(enc)
+                                    break
+                                except UnicodeDecodeError:
+                                    continue
+                            if decoded_name is None:
+                                decoded_name = raw_bytes.decode("utf-8", errors="replace")
+
                         if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX'):
                             valid_files.append((info, decoded_name))
                     
