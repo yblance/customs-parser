@@ -13,27 +13,6 @@ def extract_text_from_pdf_bytes(pdf_bytes):
             text += page.get_text("text")
     return text
 
-def extract_port(text):
-    """指运港：兼容全/半角括号 + 跨行 + 跨段"""
-    boundary = r"(?=境内货源地|批准文号|成交方式|合同协议号|件数)"
-    m = re.search(r"指运港[^\r\n]*\r?\n([\s\S]*?)" + boundary, text)
-    if not m:
-        return ""
-    raw = m.group(1)
-    lines = [l.strip() for l in raw.split("\n") if l.strip()]
-    # 过滤掉单独的闭合括号 "）" ")"
-    lines = [l for l in lines if l not in {"）", ")"}]
-    if not lines:
-        return ""
-    # 主名行：排除以 ( 或 （ 开头的残段
-    main_lines = [l for l in lines if not (l.startswith("（") or l.startswith("("))]
-    port = " ".join(main_lines) if main_lines else lines[0]
-    # 去掉尾部的国家/地区代码括号，如 "(344)" 或 "（俄罗斯）"
-    port = re.sub(r"[\(（][^()（）]*[\)）]\s*$", "", port).strip()
-    # 兜底：若仍有未闭合的 "(xxx" 残段，从最后一个 ( 截断
-    port = re.sub(r"[\(（][^()（）]*$", "", port).strip()
-    return port
-
 def extract_fields(text, filename=""):
     """解析报关单文本，提取多产品信息"""
     public_info = {
@@ -58,10 +37,8 @@ def extract_fields(text, filename=""):
         bs = re.search(r"\b(BS-[A-Za-z0-9\-]+)\b", text)
         if bs: public_info["合同协议号"] = bs.group(1)
         
-    # 🌟 修复指运港 Bug：兼容全/半角括号、跨行、多行抓取
-    port = extract_port(text)
-    if port:
-        public_info["指运港"] = port
+    port = re.search(r"指运港\(地区\)[^\r\n]*[\r\n]+\s*([^\r\n]+)", text)
+    if port: public_info["指运港"] = port.group(1).strip()
 
     # 切块提取商品明细
     hs_matches = list(re.finditer(r"\b(\d{10})\b", text))
@@ -125,15 +102,11 @@ def extract_fields(text, filename=""):
         # 减法提取产品名称
         lines = chunk.split('\n')
         name_parts = []
-        country = public_info.get("指运港", "")  # 若指运港未拿到，留空避免硬编码误删
+        country = public_info.get("指运港", "俄罗斯")
         remove_patterns = [
             r"商品名称[、,]?规格型号", r"申报数量/申报单位", r"法定数量/法定单位", r"第二数量/第二单位",
-            r"目的国[\(（][^()（）]*[\)）]", r"指运港[\(（][^()（）]*[\)）]", r"单价", r"总价", r"币制", r"数量及单位",
-        ]
-        if country:
-            remove_patterns.append(rf"^{re.escape(country)}$")
-        remove_patterns += [
-            r"中国", r"\b(CNY|USD|EUR|人民币|美元)\b",
+            r"目的国\(地区\)", r"指运港\(地区\)", r"单价", r"总价", r"币制", r"数量及单位",
+            country, r"中国", r"\b(CNY|USD|EUR|人民币|美元)\b",
             r"\b\d+(?:\.\d+)?\s*(千克|个|件|套|双|吨|平方米|升|台|辆|克|千米|米)\b"
         ]
         
@@ -176,26 +149,27 @@ if uploaded_zip is not None:
             data_rows = []
             try:
                 with zipfile.ZipFile(uploaded_zip) as z:
-                    # 🌟 修复乱码 Bug：分情况解码 ZIP 中的文件名
-                    # 1. 若声明了 UTF-8 标志位（位 0x800），zipfile 已按 UTF-8 解码，直接用
-                    # 2. 否则用 filename_raw 拿原始字节，依次尝试 GBK / GB2312 / Big5，都不行再退回 UTF-8
                     valid_files = []
                     for info in z.infolist():
                         if info.flag_bits & 0x800:
+                            # 规范的自带 UTF-8 标记的文件
                             decoded_name = info.filename
                         else:
-                            raw_bytes = getattr(info, "filename_raw", None) or info.filename.encode("utf-8", errors="replace")
-                            decoded_name = None
-                            for enc in ("gbk", "gb2312", "big5"):
+                            # 🌟 终极修复：处理没有 UTF-8 标记被强行按 cp437 读取的情况
+                            raw_bytes = info.filename.encode('cp437')
+                            try:
+                                # 优先尝试用 UTF-8 解码还原（修复 "姹借溅..."）
+                                decoded_name = raw_bytes.decode('utf-8')
+                            except UnicodeDecodeError:
                                 try:
-                                    decoded_name = raw_bytes.decode(enc)
-                                    break
+                                    # 备选：如果是纯 Windows 默认打包，尝试用 GBK 还原
+                                    decoded_name = raw_bytes.decode('gbk')
                                 except UnicodeDecodeError:
-                                    continue
-                            if decoded_name is None:
-                                decoded_name = raw_bytes.decode("utf-8", errors="replace")
-
-                        if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX'):
+                                    # 都不行就保持原样
+                                    decoded_name = info.filename
+                                
+                        # 过滤非 PDF 文件和 Mac 缓存文件夹
+                        if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX') and '__MACOSX' not in decoded_name:
                             valid_files.append((info, decoded_name))
                     
                     if not valid_files:
@@ -204,9 +178,9 @@ if uploaded_zip is not None:
 
                     progress_bar = st.progress(0)
                     for idx, (info, filename) in enumerate(valid_files):
+                        # 处理路径，只保留文件名
                         display_name = filename.split('/')[-1] if '/' in filename else filename
                         
-                        # 使用原始的 info 对象读取文件内容，但传递解码后的名称
                         with z.open(info) as f:
                             pdf_bytes = f.read()
                             text = extract_text_from_pdf_bytes(pdf_bytes)
