@@ -5,14 +5,9 @@ import re
 import zipfile
 import io
 
-# ==========================================
-# 核心数据提取逻辑 (与之前优化的逻辑保持一致)
-# ==========================================
-
 def extract_text_from_pdf_bytes(pdf_bytes):
     """直接从内存中的字节流读取 PDF 文本"""
     text = ""
-    # 使用 stream 参数直接加载内存中的文件
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
             text += page.get_text("text")
@@ -42,7 +37,8 @@ def extract_fields(text, filename=""):
         bs = re.search(r"\b(BS-[A-Za-z0-9\-]+)\b", text)
         if bs: public_info["合同协议号"] = bs.group(1)
         
-    port = re.search(r"指运港\(地区\)[^\n]*\n\s*([^\n]+)", text)
+    # 🌟 修复指运港 Bug：兼容跨平台的 \r\n 和 \n 换行符
+    port = re.search(r"指运港\(地区\)[^\r\n]*[\r\n]+\s*([^\r\n]+)", text)
     if port: public_info["指运港"] = port.group(1).strip()
 
     # 切块提取商品明细
@@ -146,7 +142,6 @@ st.markdown("""
 提取多产品明细并自动处理跨行规格，最终生成合并的 Excel 表格。
 """)
 
-# 1. 文件上传组件
 uploaded_zip = st.file_uploader("请上传包含报关单PDF的ZIP压缩包", type=["zip"])
 
 if uploaded_zip is not None:
@@ -154,49 +149,53 @@ if uploaded_zip is not None:
         with st.spinner("正在逐个解析 PDF 文件，请稍候..."):
             data_rows = []
             try:
-                # 2. 在内存中读取 ZIP 文件
                 with zipfile.ZipFile(uploaded_zip) as z:
-                    file_list = z.namelist()
-                    # 过滤出 PDF 文件，同时排除 Mac 常见的隐藏文件夹干扰
-                    pdf_files = [f for f in file_list if f.lower().endswith('.pdf') and not f.startswith('__MACOSX')]
+                    # 🌟 修复乱码 Bug：强制用正确编码解析 ZIP 中的文件名
+                    valid_files = []
+                    for info in z.infolist():
+                        # 判断是否已经是 utf-8 编码
+                        if info.flag_bits & 0x800:
+                            decoded_name = info.filename
+                        else:
+                            # 尝试修复 Windows 的 GBK 编码乱码
+                            try:
+                                decoded_name = info.filename.encode('cp437').decode('gbk')
+                            except:
+                                decoded_name = info.filename
+                                
+                        if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX'):
+                            valid_files.append((info, decoded_name))
                     
-                    if not pdf_files:
+                    if not valid_files:
                         st.error("❌ 压缩包中没有找到有效的 PDF 文件，请检查。")
                         st.stop()
 
-                    # 3. 循环解析每一个 PDF
                     progress_bar = st.progress(0)
-                    for idx, filename in enumerate(pdf_files):
-                        # 获取单纯的文件名（去掉文件夹路径）
+                    for idx, (info, filename) in enumerate(valid_files):
                         display_name = filename.split('/')[-1] if '/' in filename else filename
                         
-                        with z.open(filename) as f:
+                        # 使用原始的 info 对象读取文件内容，但传递解码后的名称
+                        with z.open(info) as f:
                             pdf_bytes = f.read()
                             text = extract_text_from_pdf_bytes(pdf_bytes)
                             rows = extract_fields(text, filename=display_name)
                             data_rows.extend(rows)
                             
-                        # 更新进度条
-                        progress_bar.progress((idx + 1) / len(pdf_files))
+                        progress_bar.progress((idx + 1) / len(valid_files))
 
-                # 4. 生成数据报表并提供下载
                 if data_rows:
                     df = pd.DataFrame(data_rows)
                     cols = ["来源文件名", "海关编号", "出口日期", "合同协议号", "指运港", "产品名称", "数量", "单价", "总价", "币制"]
                     df = df.reindex(columns=cols)
                     
                     st.success(f"✅ 解析完成！共提取到 {len(data_rows)} 条产品记录。")
-                    
-                    # 在前端预览数据
                     st.dataframe(df, use_container_width=True)
                     
-                    # 内存生成 Excel
                     excel_buffer = io.BytesIO()
                     with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                         df.to_excel(writer, index=False, sheet_name='报关数据明细')
                     excel_data = excel_buffer.getvalue()
                     
-                    # 5. 下载按钮
                     st.download_button(
                         label="📥 下载 Excel 报表",
                         data=excel_data,
