@@ -166,4 +166,54 @@ if uploaded_zip is not None:
                             raw_bytes = info.filename.encode('cp437')
                             try:
                                 decoded_name = raw_bytes.decode('utf-8')
-                            except UnicodeDecode
+                            except UnicodeDecodeError:
+                                try:
+                                    decoded_name = raw_bytes.decode('gbk')
+                                except UnicodeDecodeError:
+                                    decoded_name = info.filename
+                                
+                        # 过滤非 PDF 文件和 Mac 缓存文件夹
+                        if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX') and '__MACOSX' not in decoded_name:
+                            valid_files.append((info, decoded_name))
+                    
+                    if not valid_files:
+                        st.error("❌ 压缩包中没有找到有效的 PDF 文件，请检查。")
+                        st.stop()
+
+                    progress_bar = st.progress(0)
+                    for idx, (info, filename) in enumerate(valid_files):
+                        # 处理路径，只保留文件名
+                        display_name = filename.split('/')[-1] if '/' in filename else filename
+                        
+                        with z.open(info) as f:
+                            pdf_bytes = f.read()
+                            text = extract_text_from_pdf_bytes(pdf_bytes)
+                            rows = extract_fields(text, filename=display_name)
+                            data_rows.extend(rows)
+                            
+                        progress_bar.progress((idx + 1) / len(valid_files))
+
+                if data_rows:
+                    df = pd.DataFrame(data_rows)
+                    cols = ["来源文件名", "海关编号", "出口日期", "合同协议号", "指运港", "产品名称", "数量", "单价", "总价", "币制"]
+                    df = df.reindex(columns=cols)
+                    
+                    st.success(f"✅ 解析完成！共提取到 {len(data_rows)} 条产品记录。")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False, sheet_name='报关数据明细')
+                    excel_data = excel_buffer.getvalue()
+                    
+                    st.download_button(
+                        label="📥 下载 Excel 报表",
+                        data=excel_data,
+                        file_name="报关单提取汇总.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.warning("⚠️ 没有提取到任何有效数据，请确保上传的 PDF 是标准报关单格式。")
+
+            except Exception as e:
+                st.error(f"解析过程中出现错误: {e}")
