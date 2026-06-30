@@ -38,12 +38,12 @@ def extract_fields(text, filename=""):
         if bs: public_info["合同协议号"] = bs.group(1)
         
     # 🌟 恢复你测试通过的最稳妥的指运港提取逻辑
-    port = re.search(r"指运港\(地区\)[^\n]*\n\s*([^\n]+)", text)
+    port = re.search(r"指运港[（(][^\r\n]*[）)][^\r\n]*\r?\n\s*([^\r\n]+)", text)
     if port: 
         public_info["指运港"] = port.group(1).strip()
     else:
         # 增加一个备用兜底逻辑，直接抓取附近的中文
-        port_alt = re.search(r"指运港\(地区\).*?([\u4e00-\u9fa5]+)", text)
+        port_alt = re.search(r"指运港[（(][^\r\n]*[）)].*?([\u4e00-\u9fa5]+)", text)
         if port_alt:
             public_info["指运港"] = port_alt.group(1).strip()
 
