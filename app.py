@@ -190,25 +190,24 @@ if uploaded_zip is not None:
             data_rows = []
             try:
                 with zipfile.ZipFile(uploaded_zip) as z:
-                    # 🌟 修复乱码 Bug：分情况解码 ZIP 中的文件名
                     valid_files = []
                     for info in z.infolist():
                         if info.flag_bits & 0x800:
+                            # 规范的自带 UTF-8 标记的文件
                             decoded_name = info.filename
                         else:
-                            raw_bytes = getattr(info, "filename_raw", None) or \
-                                info.filename.encode("utf-8", errors="replace")
-                            decoded_name = None
-                            for enc in ("gbk", "gb2312", "big5"):
+                            # 🌟 终极修复：处理没有 UTF-8 标记被强行按 cp437 读取的情况
+                            raw_bytes = info.filename.encode('cp437')
+                            try:
+                                decoded_name = raw_bytes.decode('utf-8')
+                            except UnicodeDecodeError:
                                 try:
-                                    decoded_name = raw_bytes.decode(enc)
-                                    break
+                                    decoded_name = raw_bytes.decode('gbk')
                                 except UnicodeDecodeError:
-                                    continue
-                            if decoded_name is None:
-                                decoded_name = raw_bytes.decode("utf-8", errors="replace")
-
-                        if decoded_name.lower().endswith(".pdf") and not decoded_name.startswith("__MACOSX"):
+                                    decoded_name = info.filename
+                                
+                        # 过滤非 PDF 文件和 Mac 缓存文件夹
+                        if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX') and '__MACOSX' not in decoded_name:
                             valid_files.append((info, decoded_name))
 
                     if not valid_files:
