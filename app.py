@@ -37,8 +37,15 @@ def extract_fields(text, filename=""):
         bs = re.search(r"\b(BS-[A-Za-z0-9\-]+)\b", text)
         if bs: public_info["合同协议号"] = bs.group(1)
         
-    port = re.search(r"指运港\(地区\)[^\r\n]*[\r\n]+\s*([^\r\n]+)", text)
-    if port: public_info["指运港"] = port.group(1).strip()
+    # 🌟 恢复你测试通过的最稳妥的指运港提取逻辑
+    port = re.search(r"指运港\(地区\)[^\n]*\n\s*([^\n]+)", text)
+    if port: 
+        public_info["指运港"] = port.group(1).strip()
+    else:
+        # 增加一个备用兜底逻辑，直接抓取附近的中文
+        port_alt = re.search(r"指运港\(地区\).*?([\u4e00-\u9fa5]+)", text)
+        if port_alt:
+            public_info["指运港"] = port_alt.group(1).strip()
 
     # 切块提取商品明细
     hs_matches = list(re.finditer(r"\b(\d{10})\b", text))
@@ -158,58 +165,5 @@ if uploaded_zip is not None:
                             # 🌟 终极修复：处理没有 UTF-8 标记被强行按 cp437 读取的情况
                             raw_bytes = info.filename.encode('cp437')
                             try:
-                                # 优先尝试用 UTF-8 解码还原（修复 "姹借溅..."）
                                 decoded_name = raw_bytes.decode('utf-8')
-                            except UnicodeDecodeError:
-                                try:
-                                    # 备选：如果是纯 Windows 默认打包，尝试用 GBK 还原
-                                    decoded_name = raw_bytes.decode('gbk')
-                                except UnicodeDecodeError:
-                                    # 都不行就保持原样
-                                    decoded_name = info.filename
-                                
-                        # 过滤非 PDF 文件和 Mac 缓存文件夹
-                        if decoded_name.lower().endswith('.pdf') and not decoded_name.startswith('__MACOSX') and '__MACOSX' not in decoded_name:
-                            valid_files.append((info, decoded_name))
-                    
-                    if not valid_files:
-                        st.error("❌ 压缩包中没有找到有效的 PDF 文件，请检查。")
-                        st.stop()
-
-                    progress_bar = st.progress(0)
-                    for idx, (info, filename) in enumerate(valid_files):
-                        # 处理路径，只保留文件名
-                        display_name = filename.split('/')[-1] if '/' in filename else filename
-                        
-                        with z.open(info) as f:
-                            pdf_bytes = f.read()
-                            text = extract_text_from_pdf_bytes(pdf_bytes)
-                            rows = extract_fields(text, filename=display_name)
-                            data_rows.extend(rows)
-                            
-                        progress_bar.progress((idx + 1) / len(valid_files))
-
-                if data_rows:
-                    df = pd.DataFrame(data_rows)
-                    cols = ["来源文件名", "海关编号", "出口日期", "合同协议号", "指运港", "产品名称", "数量", "单价", "总价", "币制"]
-                    df = df.reindex(columns=cols)
-                    
-                    st.success(f"✅ 解析完成！共提取到 {len(data_rows)} 条产品记录。")
-                    st.dataframe(df, use_container_width=True)
-                    
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        df.to_excel(writer, index=False, sheet_name='报关数据明细')
-                    excel_data = excel_buffer.getvalue()
-                    
-                    st.download_button(
-                        label="📥 下载 Excel 报表",
-                        data=excel_data,
-                        file_name="报关单提取汇总.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                else:
-                    st.warning("⚠️ 没有提取到任何有效数据，请确保上传的 PDF 是标准报关单格式。")
-
-            except Exception as e:
-                st.error(f"解析过程中出现错误: {e}")
+                            except UnicodeDecode
